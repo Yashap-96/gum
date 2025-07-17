@@ -26,10 +26,13 @@ from .observer import Observer
 from ..schemas import Update
 
 # — OpenAI async client —
-from openai import AsyncOpenAI
+import google.generativeai as genai
 
 # — Local —
 from gum.prompts.screen import TRANSCRIPTION_PROMPT, SUMMARY_PROMPT
+
+# .env example:
+# GEMINI_API_KEY=your-gemini-api-key-here
 
 ###############################################################################
 # Window‑geometry helpers                                                     #
@@ -121,7 +124,7 @@ class Screen(Observer):
     """Observer that captures and analyzes screen content around user interactions.
 
     This observer captures screenshots before and after user interactions (mouse movements,
-    clicks, and scrolls) and uses GPT-4 Vision to analyze the content. It can also take
+    clicks, and scrolls) and uses Gemini Vision to analyze the content. It can also take
     periodic screenshots and skip captures when certain applications are visible.
 
     Args:
@@ -132,7 +135,7 @@ class Screen(Observer):
             Defaults to None.
         summary_prompt (Optional[str], optional): Custom prompt for summarizing screenshots.
             Defaults to None.
-        model_name (str, optional): GPT model to use for vision analysis. Defaults to "gpt-4o-mini".
+        model_name (str, optional): Gemini model to use for vision analysis. Defaults to "gemini-2.5-flash".
         history_k (int, optional): Number of recent screenshots to keep in history. Defaults to 10.
         debug (bool, optional): Enable debug logging. Defaults to False.
 
@@ -142,14 +145,16 @@ class Screen(Observer):
         _MON_START (int): Index of first real display in mss.
     """
 
-    _CAPTURE_FPS: int = 10
+    _CAPTURE_FPS: int = 1  # 1 FPS (will use sleep to achieve 20s interval)
     _DEBOUNCE_SEC: int = 2
     _MON_START: int = 1     # first real display in mss
+    _MIN_API_INTERVAL_SEC: int = 30  # Minimum interval between API calls (seconds)
+    _last_api_call: float = 0.0
 
     # ─────────────────────────────── construction
     def __init__(
         self,
-        model_name: str = "gpt-4o-mini",
+        model_name: str = "gemini-2.5-flash",
         screenshots_dir: str = "~/.cache/gum/screenshots",
         skip_when_visible: Optional[str | list[str]] = None,
         transcription_prompt: Optional[str] = None,
@@ -169,7 +174,7 @@ class Screen(Observer):
                 Defaults to None.
             summary_prompt (Optional[str], optional): Custom prompt for summarizing screenshots.
                 Defaults to None.
-            model_name (str, optional): GPT model to use for vision analysis. Defaults to "gpt-4o-mini".
+            model_name (str, optional): Gemini model to use for vision analysis. Defaults to "gemini-2.5-flash".
             history_k (int, optional): Number of recent screenshots to keep in history. Defaults to 10.
             debug (bool, optional): Enable debug logging. Defaults to False.
         """
@@ -191,14 +196,12 @@ class Screen(Observer):
         self._history: deque[str] = deque(maxlen=max(0, history_k))
         self._pending_event: Optional[dict] = None
         self._debounce_handle: Optional[asyncio.TimerHandle] = None
-        self.client = AsyncOpenAI(
-            # try the class, then the env for screen, then the env for gum
-            base_url=api_base or os.getenv("SCREEN_LM_API_BASE") or os.getenv("GUM_LM_API_BASE"), 
-
-            # try the class, then the env for screen, then the env for GUM, then none
-            api_key=api_key or os.getenv("SCREEN_LM_API_KEY") or os.getenv("GUM_LM_API_KEY") or os.getenv("OPENAI_API_KEY") or "None"
-        )
-
+        # Gemini API key setup
+        self.gemini_api_key = api_key or os.getenv("GEMINI_API_KEY")
+        if not self.gemini_api_key:
+            raise RuntimeError("GEMINI_API_KEY environment variable not set. Please add it to your .env file or environment.")
+        genai.configure(api_key=self.gemini_api_key)
+        self.gemini_model = genai.GenerativeModel(self.model_name)
         # call parent
         super().__init__()
 
@@ -235,32 +238,17 @@ class Screen(Observer):
 
     # ─────────────────────────────── OpenAI Vision (async)
     async def _call_gpt_vision(self, prompt: str, img_paths: list[str]) -> str:
-        """Call GPT Vision API to analyze images.
-        
-        Args:
-            prompt (str): Prompt to guide the analysis.
-            img_paths (list[str]): List of image paths to analyze.
-            
-        Returns:
-            str: GPT's analysis of the images.
-        """
-        content = [
-            {
-                "type": "image_url",
-                "image_url": {"url": f"data:image/jpeg;base64,{encoded}"},
-            }
-            for encoded in (await asyncio.gather(
-                *[asyncio.to_thread(self._encode_image, p) for p in img_paths]
-            ))
-        ]
-        content.append({"type": "text", "text": prompt})
-
-        rsp = await self.client.chat.completions.create(
-            model=self.model_name,
-            messages=[{"role": "user", "content": content}],
-            response_format={"type": "text"},
+        """Call Gemini Vision API to analyze images."""
+        try:
+            from PIL import Image
+        except ImportError:
+            raise ImportError("Pillow is required for image processing. Install it with 'pip install Pillow'.")
+        images = [Image.open(p) for p in img_paths if p]
+        # Gemini expects a list of images and a prompt
+        response = await asyncio.to_thread(
+            lambda: self.gemini_model.generate_content([*images, prompt])
         )
-        return rsp.choices[0].message.content
+        return response.text
 
     # ─────────────────────────────── I/O helpers
     async def _save_frame(self, frame, tag: str) -> str:
@@ -284,12 +272,12 @@ class Screen(Observer):
         return path
 
     async def _process_and_emit(self, before_path: str, after_path: str) -> None:
-        """Process screenshots and emit an update.
-        
-        Args:
-            before_path (str): Path to the "before" screenshot.
-            after_path (str | None): Path to the "after" screenshot, if any.
-        """
+        """Process screenshots and emit an update."""
+        import time
+        now = time.time()
+        if now - self._last_api_call < self._MIN_API_INTERVAL_SEC:
+            return  # Skip if called too soon
+        self._last_api_call = now
         # chronology: append 'before' first (history order == real order)
         self._history.append(before_path)
         prev_paths = list(self._history)
@@ -422,9 +410,9 @@ class Screen(Observer):
                     async with self._frame_lock:
                         self._frames[idx] = frame
 
-                # fps throttle
+                # fps throttle (set to 20s interval)
                 dt = time.time() - t0
-                await asyncio.sleep(max(0, (1 / CAP_FPS) - dt))
+                await asyncio.sleep(max(0, 20 - dt))
 
             # shutdown
             listener.stop()

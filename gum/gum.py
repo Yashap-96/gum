@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from typing import Callable, List
 from .models import observation_proposition
 
-from openai import AsyncOpenAI
+import google.generativeai as genai
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import insert
 
@@ -31,6 +31,17 @@ from .schemas import (
     AuditSchema
 )
 from gum.prompts.gum import AUDIT_PROMPT, PROPOSE_PROMPT, REVISE_PROMPT, SIMILAR_PROMPT
+import re
+
+def extract_json(raw):
+    # Remove code block markers if present
+    match = re.search(r'```json\s*(\{.*?\})\s*```', raw, re.DOTALL)
+    if match:
+        return match.group(1)
+    match = re.search(r'```\s*(\{.*?\})\s*```', raw, re.DOTALL)
+    if match:
+        return match.group(1)
+    return raw
 
 class gum:
     """A class for managing general user models.
@@ -56,7 +67,7 @@ class gum:
     def __init__(
         self,
         user_name: str,
-        model: str,
+        model: str = "gemini-2.5-flash",
         *observers: Observer,
         propose_prompt: str | None = None,
         similar_prompt: str | None = None,
@@ -94,10 +105,12 @@ class gum:
         self.revise_prompt = revise_prompt or REVISE_PROMPT
         self.audit_prompt = audit_prompt or AUDIT_PROMPT
 
-        self.client = AsyncOpenAI(
-            base_url=api_base or os.getenv("GUM_LM_API_BASE"), 
-            api_key=api_key or os.getenv("GUM_LM_API_KEY") or os.getenv("OPENAI_API_KEY") or "None"
-        )
+        # Gemini API key setup
+        self.gemini_api_key = api_key or os.getenv("GEMINI_API_KEY")
+        if not self.gemini_api_key:
+            raise RuntimeError("GEMINI_API_KEY environment variable not set. Please add it to your .env file or environment.")
+        genai.configure(api_key=self.gemini_api_key)
+        self.gemini_model = genai.GenerativeModel(self.model)
 
         self.engine = None
         self.Session = None
@@ -209,14 +222,21 @@ class gum:
             .replace("{inputs}", update.content)
         )
 
-        schema = PropositionSchema.model_json_schema()
-        rsp = await self.client.chat.completions.create(
-            model=self.model,
-            messages=[{"role": "user", "content": prompt}],
-            response_format=get_schema(schema),
+        # Gemini text generation
+        response = await asyncio.to_thread(
+            lambda: self.gemini_model.generate_content(prompt)
         )
-
-        return json.loads(rsp.choices[0].message.content)["propositions"]
+        raw = response.text.strip()
+        raw = extract_json(raw)
+        if not raw:
+            self.logger.error("Gemini returned an empty response for proposition generation.")
+            return []
+        try:
+            data = json.loads(raw)
+            return data["propositions"]
+        except Exception as e:
+            self.logger.error(f"Failed to parse Gemini response as JSON in _construct_propositions: {raw}\nError: {e}")
+            return []
 
     async def _build_relation_prompt(self, all_props) -> str:
         """Build a prompt for analyzing relationships between propositions.
@@ -255,13 +275,16 @@ class gum:
         ]
         prompt_text = await self._build_relation_prompt(payload)
 
-        rsp = await self.client.chat.completions.create(
-            model=self.model,
-            messages=[{"role": "user", "content": prompt_text}],
-            response_format=get_schema(RelationSchema.model_json_schema()),
+        response = await asyncio.to_thread(
+            lambda: self.gemini_model.generate_content(prompt_text)
         )
-
-        data = RelationSchema.model_validate_json(rsp.choices[0].message.content)
+        raw = response.text.strip()
+        raw = extract_json(raw)
+        try:
+            data = RelationSchema.model_validate_json(raw)
+        except Exception as e:
+            self.logger.error(f"Failed to parse Gemini response as JSON in _filter_propositions: {raw}\nError: {e}")
+            return [], [], []
 
         id_to_prop = {p.id: p for p in rel_props}
         ident, sim, unrel = set(), set(), set()
@@ -325,12 +348,20 @@ class gum:
         """
         body = await self._build_revision_body(similar_cluster, related_obs)
         prompt = self.revise_prompt.replace("{body}", body)
-        rsp = await self.client.chat.completions.create(
-            model=self.model,
-            messages=[{"role": "user", "content": prompt}],
-            response_format=get_schema(PropositionSchema.model_json_schema()), 
+        response = await asyncio.to_thread(
+            lambda: self.gemini_model.generate_content(prompt)
         )
-        return json.loads(rsp.choices[0].message.content)["propositions"]
+        raw = response.text.strip()
+        raw = extract_json(raw)
+        if not raw:
+            self.logger.error("Gemini returned an empty response for proposition revision.")
+            return []
+        try:
+            data = json.loads(raw)
+            return data["propositions"]
+        except Exception as e:
+            self.logger.error(f"Failed to parse Gemini response as JSON in _revise_propositions: {raw}\nError: {e}")
+            return []
 
     async def _generate_and_search(
         self, session: AsyncSession, update: Update, obs: Observation
@@ -462,19 +493,25 @@ class gum:
             .replace("{user_name}", self.user_name)
         )
 
-        rsp = await self.client.chat.completions.create(
-            model=self.model,
-            messages=[{"role": "user", "content": prompt}],
-            response_format=get_schema(AuditSchema.model_json_schema()),
-            temperature=0.0,
+        response = await asyncio.to_thread(
+            lambda: self.gemini_model.generate_content(prompt)
         )
-        decision = json.loads(rsp.choices[0].message.content)
+        raw = response.text.strip()
+        raw = extract_json(raw)
+        if not raw:
+            self.logger.error("Gemini returned an empty response for audit.")
+            return False
+        try:
+            decision = json.loads(raw)
+        except Exception as e:
+            self.logger.error(f"Failed to parse Gemini response as JSON in _handle_audit: {raw}\nError: {e}")
+            return False
 
-        if not decision["transmit_data"]:
+        if not decision.get("transmit_data", True):
             self.logger.warning(
                 "Audit blocked transmission (data_type=%s, subject=%s)",
-                decision["data_type"],
-                decision["subject"],
+                decision.get("data_type"),
+                decision.get("subject"),
             )
             return True
 

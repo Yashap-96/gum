@@ -50,7 +50,7 @@ async def main():
             print(f"Cache directory does not exist: {cache_dir}")
         return
 
-    model = args.model or os.getenv('MODEL_NAME') or 'gpt-4o-mini'
+    model = args.model or os.getenv('MODEL_NAME') or 'gemini-2.5-flash'
     user_name = args.user_name or os.getenv('USER_NAME')
 
     # you need one or the other-
