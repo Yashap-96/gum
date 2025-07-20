@@ -28,7 +28,8 @@ def parse_args():
     
     parser.add_argument('--limit', '-l', type=int, help='Limit the number of results', default=10)
     parser.add_argument('--model', '-m', type=str, help='Model to use')
-    parser.add_argument('--reset-cache', action='store_true', help='Reset the GUM cache and exit')  # Add this line
+    parser.add_argument('--reset-cache', action='store_true', help='Reset the GUM cache and exit')
+    parser.add_argument('--api', action='store_true', help='Start GUM server with REST API')
 
     args = parser.parse_args()
 
@@ -48,6 +49,14 @@ async def main():
             print(f"Deleted cache directory: {cache_dir}")
         else:
             print(f"Cache directory does not exist: {cache_dir}")
+        return
+
+    # Handle --api to start REST API server
+    if getattr(args, 'api', False):
+        print("Starting GUM server with REST API...")
+        from .api import app
+        import uvicorn
+        uvicorn.run(app, host="0.0.0.0", port=8000)
         return
 
     model = args.model or os.getenv('MODEL_NAME') or 'gemini-2.5-flash'
