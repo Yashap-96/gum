@@ -41,24 +41,6 @@ def parse_args():
 async def main():
     args = parse_args()
 
-    # Handle --reset-cache before anything else
-    if getattr(args, 'reset_cache', False):
-        cache_dir = os.path.expanduser('~/.cache/gum/')
-        if os.path.exists(cache_dir):
-            shutil.rmtree(cache_dir)
-            print(f"Deleted cache directory: {cache_dir}")
-        else:
-            print(f"Cache directory does not exist: {cache_dir}")
-        return
-
-    # Handle --api to start REST API server
-    if getattr(args, 'api', False):
-        print("Starting GUM server with REST API...")
-        from .api import app
-        import uvicorn
-        uvicorn.run(app, host="0.0.0.0", port=8000)
-        return
-
     model = args.model or os.getenv('MODEL_NAME') or 'gemini-2.5-flash'
     user_name = args.user_name or os.getenv('USER_NAME')
 
@@ -88,6 +70,27 @@ async def main():
             await asyncio.Future()  # run forever (Ctrl-C to stop)
 
 def cli():
+    args = parse_args()
+    
+    # Handle --api to start REST API server (outside of asyncio context)
+    if getattr(args, 'api', False):
+        print("Starting GUM server with REST API...")
+        from .api import app
+        import uvicorn
+        uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info")
+        return
+    
+    # Handle --reset-cache (outside of asyncio context)
+    if getattr(args, 'reset_cache', False):
+        cache_dir = os.path.expanduser('~/.cache/gum/')
+        if os.path.exists(cache_dir):
+            shutil.rmtree(cache_dir)
+            print(f"Deleted cache directory: {cache_dir}")
+        else:
+            print(f"Cache directory does not exist: {cache_dir}")
+        return
+    
+    # Run the async main function for other operations
     asyncio.run(main())
 
 if __name__ == '__main__':

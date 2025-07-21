@@ -54,6 +54,14 @@ class FeedbackRequest(BaseModel):
     feedback_type: str  # "thumbs_up", "thumbs_down", "complete", "dismiss"
     comment: Optional[str] = None
 
+class StartRecordingRequest(BaseModel):
+    user_name: str
+    model: str = "gemini-2.5-flash"
+
+class UpdatePropositionRequest(BaseModel):
+    text: str
+    reasoning: str
+
 # Global GUM instance
 gum_instance: Optional[gum] = None
 gum_task: Optional[asyncio.Task] = None
@@ -63,9 +71,16 @@ app = FastAPI(title="GUM API", version="1.0.0")
 # CORS middleware for web app
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://localhost:5173"],  # React dev servers
+    allow_origins=[
+        "http://localhost:3000", 
+        "http://localhost:3001", 
+        "http://localhost:5173", 
+        "http://127.0.0.1:3000", 
+        "http://127.0.0.1:3001", 
+        "http://127.0.0.1:5173"
+    ],  # React dev servers
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
 
@@ -97,6 +112,25 @@ async def broadcast_update(message: Dict[str, Any]):
             return_exceptions=True
         )
 
+@app.get("/")
+async def root():
+    """Root endpoint that redirects to API documentation."""
+    return {
+        "message": "GUM API Server",
+        "version": "1.0.0",
+        "endpoints": {
+            "status": "/api/status",
+            "recording": {
+                "start": "/api/recording/start",
+                "stop": "/api/recording/stop"
+            },
+            "suggestions": "/api/suggestions",
+            "propositions": "/api/propositions",
+            "websocket": "/ws"
+        },
+        "documentation": "/docs"
+    }
+
 @app.get("/api/status")
 async def get_server_status() -> ServerStatus:
     """Get the current status of the GUM server."""
@@ -119,8 +153,13 @@ async def get_server_status() -> ServerStatus:
         last_activity=datetime.now(timezone.utc)
     )
 
+@app.options("/api/recording/start")
+async def options_start_recording():
+    """Handle CORS preflight for start recording."""
+    return {}
+
 @app.post("/api/recording/start")
-async def start_recording(user_name: str, model: str = "gemini-2.5-flash"):
+async def start_recording(request: StartRecordingRequest):
     """Start the GUM server with screen recording."""
     global gum_instance, gum_task
     
@@ -129,7 +168,7 @@ async def start_recording(user_name: str, model: str = "gemini-2.5-flash"):
     
     try:
         # Create and start GUM instance
-        gum_instance = gum(user_name, model, Screen(model))
+        gum_instance = gum(request.user_name, request.model, Screen(request.model))
         await gum_instance.connect_db()
         gum_instance.start_update_loop()
         
@@ -139,15 +178,20 @@ async def start_recording(user_name: str, model: str = "gemini-2.5-flash"):
         await broadcast_update({
             "type": "server_status",
             "status": "started",
-            "user_name": user_name,
-            "model": model
+            "user_name": request.user_name,
+            "model": request.model
         })
         
-        return {"status": "started", "user_name": user_name, "model": model}
+        return {"status": "started", "user_name": request.user_name, "model": request.model}
     
     except Exception as e:
         logging.error(f"Failed to start GUM server: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to start server: {str(e)}")
+
+@app.options("/api/recording/stop")
+async def options_stop_recording():
+    """Handle CORS preflight for stop recording."""
+    return {}
 
 @app.post("/api/recording/stop")
 async def stop_recording():
@@ -275,7 +319,7 @@ async def get_propositions(limit: int = 50, search: Optional[str] = None) -> Lis
         raise HTTPException(status_code=500, detail=f"Failed to get propositions: {str(e)}")
 
 @app.put("/api/propositions/{proposition_id}")
-async def update_proposition(proposition_id: int, text: str, reasoning: str):
+async def update_proposition(proposition_id: int, request: UpdatePropositionRequest):
     """Update a proposition."""
     global gum_instance
     
@@ -294,8 +338,8 @@ async def update_proposition(proposition_id: int, text: str, reasoning: str):
                 raise HTTPException(status_code=404, detail="Proposition not found")
             
             # Update the proposition
-            prop.text = text
-            prop.reasoning = reasoning
+            prop.text = request.text
+            prop.reasoning = request.reasoning
             prop.updated_at = datetime.now(timezone.utc)
             
             await session.commit()
