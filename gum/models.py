@@ -8,6 +8,7 @@ from typing import Optional
 from sqlalchemy import (
     Column,
     DateTime,
+    Float,
     ForeignKey,
     Integer,
     String,
@@ -134,6 +135,10 @@ class Proposition(Base):
         reasoning (str): The reasoning behind this proposition.
         confidence (Optional[int]): Confidence level in this proposition.
         decay (Optional[int]): Decay factor for this proposition.
+        utility_score (Optional[float]): The calculated utility of the suggestion.
+        benefit (Optional[float]): The benefit score of the suggestion.
+        cost (Optional[float]): The cost score of the suggestion.
+        status (str): The current status of the suggestion (e.g., active, completed, dismissed).
         created_at (datetime): When the proposition was created.
         updated_at (datetime): When the proposition was last updated.
         revision_group (str): Group identifier for related proposition revisions.
@@ -148,6 +153,11 @@ class Proposition(Base):
     reasoning:  Mapped[str]           = mapped_column(Text, nullable=False)
     confidence: Mapped[Optional[int]]
     decay:      Mapped[Optional[int]]
+    
+    utility_score: Mapped[Optional[float]]
+    benefit:       Mapped[Optional[float]]
+    cost:          Mapped[Optional[float]]
+    status:        Mapped[str]           = mapped_column(String(50), nullable=False, server_default="active")
 
     created_at: Mapped[str]           = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
